@@ -1,3 +1,10 @@
+/*
+Updated code with Wind info, random colors for apples and auras
+Random number of apples inside trees
+
+
+*/
+
 import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.126.0/build/three.module.js';
 import { World }    from './world.mjs';
 import { MeshSurfaceSampler } from 'https://cdn.skypack.dev/three/examples/jsm/math/MeshSurfaceSampler.js';
@@ -57,7 +64,7 @@ void main()
 
 let outsider = 0;
 
-/* 
+
 const client = mqtt.connect(
   "wss://poetryai:605k8jiP5ZQXyMEJ@poetryai.cloud.shiftr.io",
   {
@@ -75,7 +82,7 @@ client.on("message", function (topic0, message0) {
   console.log ("float: Wind", outsider);
 });
 
-*/ 
+
 let noise = openSimplexNoise.makeNoise4D(Date.now());
 
 function buildForest(world) {
@@ -83,6 +90,10 @@ function buildForest(world) {
     const woods = new THREE.Group();
     const fogColor = new THREE.Color(0xffcccc);
     //const fog = new THREE.FogExp2(0xffcccc, 0.02);
+
+    let lowWindColor = new THREE.Color(0xffcccc);
+    let highWindColor = new THREE.Color()
+    highWindColor.setHSL(0.8, 0.2, 0.8)
     world.scene.add(woods);
     world.scene.background = fogColor;
     //world.scene.fog = new THREE.Fog(fogColor, 0.0025, 20);
@@ -105,7 +116,7 @@ function buildForest(world) {
     });
 
     // Bubbles
-    const bubbleGeometry = new THREE.IcosahedronGeometry(1, 5); // radius, detail (radius changes dynamically in Render function)
+    const bubbleGeometry = new THREE.IcosahedronGeometry(3, 5); // radius, detail (radius changes dynamically in Render function)
     let bubblePositions = bubbleGeometry.attributes.position;
     {
         let nPos = [];
@@ -128,8 +139,8 @@ function buildForest(world) {
 
     // ! ----------------------------------------- APPLES
     // setup shapes for sampled meshes
-    const sphereGeometry = new THREE.SphereBufferGeometry(0.1, 6, 6);
-    const sphereMaterial = new THREE.MeshBasicMaterial({ color: "purple" });
+    //const sphereGeometry = new THREE.SphereBufferGeometry(0.1, 6, 6);
+    //const sphereMaterial = new THREE.MeshBasicMaterial({ color: "purple" });
     //const apples = new THREE.InstancedMesh(sphereGeometry,sphereMaterial,20);  // ! <------------------------  apples
 
     // set array for each point
@@ -175,8 +186,8 @@ function buildForest(world) {
                 }
                 const positionsAttribute = new THREE.BufferAttribute(positionsArray, 3);
                 foliageGeo.setAttribute("position", positionsAttribute); // Combine the positions with the geometry
-                const auraMtrl = new THREE.MeshBasicMaterial( { color: 0xffff00, transparent: true, opacity: 0.1 } );
-                const auraGeo = new THREE.SphereGeometry( 12, 32, 16 );
+                const auraMtrl = new THREE.MeshBasicMaterial( { color: randomColor(), transparent: true, opacity: 0.075 } );
+                const auraGeo = new THREE.SphereGeometry( 8, 32, 16 );
                 const innerAuraMtrl = new THREE.MeshBasicMaterial( { color: 0xffff00, transparent: true, opacity: 0.3} );
                 const innerAuraGeo = new THREE.SphereGeometry( 5, 16, 8 );
               //  moreFoliageGeo.setAttribute("position", positionsAttribute);
@@ -199,6 +210,8 @@ function buildForest(world) {
 
                 // generate the instances
                 // ! Do I need this? It's created above
+                const sphereGeometry = new THREE.SphereBufferGeometry(0.1, 6, 6);
+                const sphereMaterial = new THREE.MeshBasicMaterial({ color: randomColor() });
                 const apples = new THREE.InstancedMesh(sphereGeometry,sphereMaterial,20);
                 apples.name = "apples"
                 //scene.add(apples);
@@ -210,7 +223,7 @@ function buildForest(world) {
                 const tempObject = new THREE.Object3D();
 
                 // loop sampled elements
-                for (let i = 0; i <10; i++) {
+                for (let i = 0; i <randomApple([3,7,5,12,8,13,10,21]); i++) {
                     // sample random point on the surface of bubbleMesh
                     sampler.sample(tempPosition);
                     // store point coordinates in tempObject
@@ -220,7 +233,7 @@ function buildForest(world) {
 
                     points.push(new THREE.Vector3(tempObject.position.x, tempObject.position.y,tempObject.position.z));
                     // define a random scale for the instanced apples
-                    tempObject.scale.setScalar(Math.random() * 3 + 0.5);
+                    tempObject.scale.setScalar(Math.random() * 3);
                     // update the matrix and insert it into instancedMesh matrix
                     tempObject.updateMatrix();
                     apples.setMatrixAt(i, tempObject.matrix);
@@ -236,6 +249,9 @@ function buildForest(world) {
                 //innerAura.position.y += 2;
                 trunkMesh.position.y -= 3;
                 bubbleMesh.position.y = 3;
+
+                // randomly rotate bubbleMesh
+                bubbleMesh.rotation.y = Math.random(0,360);
 
                 bubbleMesh.name = "bubbles";
                 bubbleMesh.add(apples);
@@ -272,13 +288,23 @@ function buildForest(world) {
 
 
         bubbleTime += dt * (Math.sin(t) * 0.5 + 1.0) * 2.0;
+        bubbleTime += dt * Math.sqrt(outsider)/5; //(outsider - 60)/20; //(Math.sin(t) * 0.5 + 1.0) * 2.0;
+
+        bubbleGeometry.userData.nPos.forEach((p, idx) => {
+            let leafFluttr = 0.1*Math.sin(outsider + idx)
+            let ns = noise(p.x, p.y, p.z, bubbleTime + leafFluttr);
+            v3.copy(p).multiplyScalar(bubbleSpec.radius).addScaledVector(p, ns);
+            bubblePositions.setXYZ(idx, v3.x, v3.y, v3.z);
+        });
 
         // loop over every nPos element in the array. p = vertex position, idx = vertex index position
-        bubbleGeometry.userData.nPos.forEach((p, idx) => {
+       
+/*        bubbleGeometry.userData.nPos.forEach((p, idx) => {
             let ns = noise(p.x, p.y, p.z, bubbleTime);
             v3.copy(p).multiplyScalar(bubbleSpec.radius).addScaledVector(p, ns);
             bubblePositions.setXYZ(idx, v3.x, v3.y, v3.z);
         });
+        */
         bubbleGeometry.computeVertexNormals();
         bubblePositions.needsUpdate = true;
     }
@@ -294,7 +320,7 @@ function buildForest(world) {
             envelope: {
                 attack: 2,
                 decay: 0.1,
-                sustain: 0.5, 
+                sustain: 0.5,
                 release: 100
             }
         });
@@ -307,6 +333,21 @@ function buildForest(world) {
 
     let collidedTree = null;
     function updateForest(t, dt) {
+        // outsider, roughly 75-82?
+        const minWind = 75
+        const maxWind = 83
+        let normalizedWind = (outsider - minWind) / (maxWind - minWind);  // between 0 and 1
+
+        let newWindColor = new THREE.Color()
+        newWindColor.lerpColors(lowWindColor, highWindColor, normalizedWind);
+
+        fogColor.lerp(newWindColor, dt)
+
+        world.scene.background = fogColor;
+        world.scene.fog.color = fogColor;
+        //world.scene.fog = new THREE.Fog(fogColor, 0.0025, 20);
+        //world.scene.fog = new THREE.FogExp2(fogColor, 0.05);
+
         renderBubble(t, dt);
 
         let newTreeCollision = null;
@@ -349,7 +390,7 @@ function buildForest(world) {
             }
 
             collidedTree = newTreeCollision;
-        }    
+        }
             if (collidedTree) {
                 let outsider = 70;
                 const {foliage, bubble} = getTreeElements(collidedTree);
@@ -387,6 +428,18 @@ function getRandomInt(min, max) {
     min = Math.ceil(min);
     max = Math.floor(max);
     return Math.floor(Math.random() * (max - min) + min);
+}
+
+function randomColor(){
+    let r = Math.random(),
+    g = Math.random(),
+    b = Math.random();
+
+    return new THREE.Color(r,g,b);
+}
+
+function randomApple(amount){
+    return amount[Math.floor(Math.random()*amount.length)];
 }
 
 export {buildForest}
