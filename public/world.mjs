@@ -109,8 +109,8 @@ class World {
         scene.add(floor);
         this.walkable = [floor];
 
-        const grid = new THREE.GridHelper(35, 35, 0x333366, 0x666666);
-        scene.add(grid);
+        //const grid = new THREE.GridHelper(35, 35, 0x333366, 0x666666);
+        //scene.add(grid);
         
         if (makeLights){
 
