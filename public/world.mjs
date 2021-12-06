@@ -103,7 +103,7 @@ class World {
         scene.fog = new THREE.FogExp2(fadeColor, 0.05);
 
         // Create a floor plane marked with a grid to give local landmarks, so you can tell when you move.
-        const floor = new THREE.Mesh(new THREE.PlaneGeometry(80, 80), material);
+        const floor = new THREE.Mesh(new THREE.PlaneGeometry(800, 800), material);
         floor.receiveShadow = true;
         floor.rotation.x = -Math.PI / 2;
         scene.add(floor);
