@@ -10,6 +10,7 @@ import {print, vectorToString} from './utility.mjs';
  * Also responsible for maintaining the user's "client space" zone within the world,
  * tracking how the space of their sensor range in their physical room
  * maps into the virtual scene.
+ * 
  */ 
 class World {
     /** @type {THREE.Clock} */
