@@ -1,365 +1,169 @@
-import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.126.0/build/three.module.js';
-import { VRButton } from 'https://cdn.jsdelivr.net/npm/three@0.126.0/examples/jsm/webxr/VRButton.js';
-import {print, vectorToString} from './utility.mjs';
+/*
+A simple server to manage user connections within different "rooms"
+Server: I open a websocket server
+Client: I connect to your websocket
+Server: wss.on('connection') -- I create a UUID and client struct for you, set up my handlers, and tell you "handshake <id>"
+Client: I receive your "handshake", and copy that to my local session ID
+I reply with "handshake <id>" to confirm
+I will now start listening for other messages
+Server: I receive your "handshake" and I will now start listening for other messages
+Should:
+- ensure clients all have unique IDs (UUID)
+	- new client connection generates new UUID on server & server informs client
+	- wait for an ack back?
+	- could be nice to resume old UUID if the break wasn't too long?
+- ensure a client is in only one room at once
+- notice when a client has disconnected, & remove it
+	- this includes when client has not posted a request for a while?
+- remove a room when nobody is in it
+- receive pose updates from clients
+- reply to these with the poses of other clients in the same room
+- when a client enters or exits a room, update other clients in the same room
+- when a client changes some self-state (e.g. colour), update other clients in the same room
+- basically, forward all client changes to other clients in the same room
+A relatively lazy way to do this would be to simply send a list of client states to all members of a room, but that would be wasteful of bandwidth when client states get more complex. 
+Next laziest is to simply forward all client changes to other clients in the same room, adding the corresponding UUID. Change could be represented as a jsonpatch, but that would be wasteful for poses. Probably better to have a few commands.
+To server:
+- "enter <roomname>" (implicit exit)
+- "pose <headpos array> <quat array>"
+- "patch <jsonpatch>" for everything else
+To clients:
+- "enter <uuid>"
+- "exit <uuid>"
+- "pose <uuid> <headpos array> <quat array>"
+- "patch <uuid> <jsonpatch>"
+JSONPATCH:
+- http://jsonpatchjs.com/ node and browser, does not mutate, 
+- https://github.com/Starcounter-Jack/JSON-Patch can mutate or not, observers, diffs. ACTIVE. benchmarks show this to be fastest
+- https://github.com/sonnyp/JSON8/tree/main/packages/patch mutates, can generate diffs, inversions, can compress patches. ACTIVE. spec shows this to be the most complete. 
+*/
+
+const path = require("path")
+const fs = require('fs');
+const url = require('url');
+const http = require('http');
+const assert = require("assert");
+
+const ws = require('ws');
+const express = require("express");
+const { v4: uuidv4 } = require("uuid")
+const jsonpatch = require("json8-patch");
+const { exit } = require("process");
+
+const clients = {}
+// a set of uniquely-named rooms
+// each room would have a list of its occupants
+// a client can only be in one room at a time
+const rooms = {
 
-/**
- * Bundles up the boilerplate of setting up a THREE.js scene for VR,
- * and packs up the items we want to use most often into a "world" object with type information
- * for easier code completion when accessing it in other modules.
- * 
- * Also responsible for maintaining the user's "client space" zone within the world,
- * tracking how the space of their sensor range in their physical room
- * maps into the virtual scene.
- * 
- */ 
-class World {
-    /** @type {THREE.Clock} */
-    clock;
-
-    /** @type {THREE.WebGLRenderer} */
-    renderer;
-
-    /** @type {THREE.Scene} */
-    scene;
-
-    playerHeight = 1.5;
-
-    /**
-     * Camera used for VR view and replication. 
-     * @type {THREE.camera} */
-    vrCamera;
-
-    /**
-     * Camera used for mouse & keyboard use. 
-     * @type {THREE.camera} */
-    mouseCamera;
-
-    /** @type {THREE.Mesh[]} */
-    walkable;
-
-    /** @type {THREE.Group} */
-    clientSpace;
-
-    /** @type {THREE.material} */
-    defaultMaterial;
-
-    /** @type {THREE.Group}*/
-    teleportTarget;
-
-    /** @type {THREE.Raycaster}*/
-    raycaster = new THREE.Raycaster();
-
-    constructor(makeLights=true) {
-        // Set up basic rendering features.
-        this.clock = new THREE.Clock();
-
-        const renderer = new THREE.WebGLRenderer({antialias:true});
-        this.renderer = renderer;
-
-        renderer.setPixelRatio(window.devicePixelRatio);
-        renderer.setSize(window.innerWidth, window.innerHeight);
-        renderer.xr.enabled = true;
-
-        document.body.appendChild(renderer.domElement);
-        document.body.appendChild(VRButton.createButton(renderer));
-
-        // Setup scene and camera.
-        const scene = new THREE.Scene();
-        this.scene = scene;
-
-        const vrCamera = new THREE.PerspectiveCamera();
-        vrCamera.position.set(0, this.playerHeight, 0);
-        this.vrCamera = vrCamera;
-
-        // Nest the VR camera in a local coordinate system that we can move around for teleportation.
-        this.clientSpace = new THREE.Group();
-        this.#addSpaceReticle(this.clientSpace);
-        this.clientSpace.add(vrCamera);        
-        scene.add(this.clientSpace);        
-
-        // Create a second camera for mouse & keyboard use.
-        const mouseCamera = new THREE.PerspectiveCamera(
-            75,
-            window.innerWidth / window.innerHeight,
-            0.05,
-            100
-        );
-        mouseCamera.position.set(0, this.playerHeight, 0);
-        this.mouseCamera = mouseCamera;
-        // This one gets parented to the root of the scene, so it can work with orbit controls.
-        scene.add(mouseCamera);
-
-        // Handle resizing the canvas when the window size changes, and adapt to initial size.
-        this.#handleResize();
-        window.addEventListener('resize', this.#handleResize.bind(this), false);
-
-        // Create a basic material for the floor or other structure.
-        const material = new THREE.MeshLambertMaterial();
-        this.defaultMaterial = material;
-
-        // ! radial gradient material
-
-        let floorMat = new THREE.ShaderMaterial({
-        //let floorMat = new THREE.MeshLambertMaterial({
-            uniforms: {
-              color1: { value: new THREE.Color(0xffffff)},
-              color2: { value: new THREE.Color(0x104A80)},
-              ratio: {value: innerWidth / innerHeight}
-            },
-            vertexShader: `
-                varying vec2 vUv;
-
-                void main() {
-                vUv = uv;
-                gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0);
-                }
-            `,
-            fragmentShader: `
-                uniform vec3 color1;
-                uniform vec3 color2;
-            
-                varying vec2 vUv;
-                
-                void main() {
-                
-                gl_FragColor = vec4(mix(color1, color2, vUv.y), 1.0);
-                }
-            `
-            });
-
-        // Set up an attractive fog in the distance, to obscure harsh cutoff where the geometry ends,
-        // and to give some atmospheric perspective, to help with depth perception (esp. in non-VR view).
-        const fadeColor = 0x5099c5;
-        scene.background = new THREE.Color(fadeColor);
-        scene.fog = new THREE.FogExp2(fadeColor, 0.05);
-
-        // Create a floor plane marked with a grid to give local landmarks, so you can tell when you move.
-        const floor = new THREE.Mesh(new THREE.PlaneGeometry(200,200), floorMat);
-        floor.receiveShadow = true;
-        floor.rotation.x = -Math.PI / 2;
-        scene.add(floor);
-        this.walkable = [floor];
-
-        const grid = new THREE.GridHelper(200,200, 0x333366, 0x666666);
-        scene.add(grid);
-        
-        if (makeLights){
-
-        
-            // Add some lights to the scene to distinguish surfaces help see where objects are positioned,
-            // using the parallax of their shadow.
-            const light = new THREE.HemisphereLight(0xfffcee, 0x202555);
-            scene.add(light);
-
-            const directional = new THREE.DirectionalLight(0xfff2dd, 1.0);
-            directional.position.set(-1, 7, 0.5);
-            renderer.shadowMap.enabled = true;
-            renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-            directional.castShadow = true;
-            scene.add(directional);
-        }
-        // Add a targeting reticle for teleportation moves.
-        // (Used by both mouse & keyboard and VR controls, so might as well centralize it here).
-        this.teleportTarget = new THREE.Group();
-        this.#addSpaceReticle(this.teleportTarget);        
-        this.teleportTarget.visible = false;
-        scene.add(this.teleportTarget);        
-
-        // Create primitives geometry for things we'll want to re-use a lot,
-        // so we don't have every file making their own wastefully.
-        // (In particular, boxes and spheres are currently used by replication.js
-        //  to build the user avatars).
-        this.primitiveGeo = {         
-            box: new THREE.BoxGeometry(),         
-            ico: new THREE.IcosahedronGeometry(),         
-            sphere: new THREE.SphereGeometry(0.5, 17, 9),
-        }
-    }
-
-    /**
-     * Adds a circular reticle with a "forward" direction to the given object.
-     * @param {THREE.Object3D} space Coordinate space object to attach the reticle to.
-     */
-    #addSpaceReticle(space) {
-        space.add(new THREE.PolarGridHelper(1, 16, 1));
-        space.add((new THREE.ArrowHelper(new THREE.Vector3(0, 0, -1), new THREE.Vector3(0, 0, 0), 1.1, 0x0000ff, 0.2, 0.2)));
-    }
-
-
-    /** Handle resizing the canvas when the window size changes, and adapt to initial size. */
-    #handleResize() {                
-        if (!this.renderer.xr.isPresenting) {
-            this.renderer.setSize(window.innerWidth, window.innerHeight);
-            this.mouseCamera.aspect = window.innerWidth / window.innerHeight;
-            this.mouseCamera.updateProjectionMatrix();
-        }
-    }
-
-    /**
-     * Rotates client space so that its -z axis points along the provided direction.
-     * Rotation is only ever in the horizontal plane.
-     * @param {THREE.Vector3} worldDirection Direction in worldspace (not necessarily normalized).
-     */
-    #rotateClientSpaceToFace(worldDirection) {
-        const yaw = Math.atan2(-worldDirection.x, -worldDirection.z);
-        this.clientSpace.quaternion.set(0, Math.sin(yaw/2), 0, Math.cos(yaw/2));
-
-        this.teleportTarget.quaternion.copy(this.clientSpace.quaternion);
-    }
-
-    /**
-     * Get the location where the local client is "standing" in the world.
-     * @returns {THREE.Vector3} Position in world space under the camera, at floor height.
-     */
-     getFootPosition() {
-        // Record the position of the camera before the rotation, so we can keep it in exactly the same place.
-        const cameraPosition = this.vrCamera.position.clone();
-        // Project it down to the floor plane, and convert it to world space.
-        cameraPosition.y = 0;
-        this.clientSpace.localToWorld(cameraPosition);
-
-        return cameraPosition;
-    }
-
-    getHorizontalLookDirection() {
-        const direction = new THREE.Vector3();
-        this.vrCamera.getWorldDirection(direction);
-
-        direction.normalize();
-
-        return direction;
-    }
-
-    /**
-     * Moves/rotates the client space to place the camera at a new position/orientation,
-     * without interfering with the position/orientation of the camera relative to its sensor
-     * coordinate system.
-     * @param {THREE.Vector3} floorPositionUnderCamera The desired worldspace location of the user's feet. The camera will teleport to some distance above this.
-     * @param {?THREE.Vector3} worldLookDirection The desired worldspace direction the camera should face. Leave this undefined to keep the current orientation.
-     */
-    teleportClientSpace(floorPositionUnderCamera, worldLookDirection) {
-        // Remember where the mouse camera was relative to the clience space.
-        const mouseCameraOffset = this.mouseCamera.position.clone();
-        this.clientSpace.worldToLocal(mouseCameraOffset);
-
-        if (worldLookDirection) {
-
-            // Get the direction our camera is currently looking 
-            // along the horizontal plane, relative to the client space orientation.
-            const lookDirection = new THREE.Vector3(0, 0, -1);
-            lookDirection.applyQuaternion(this.vrCamera.quaternion);
-            lookDirection.y = 0;
-            lookDirection.normalize();
-
-            // Compute the horizontal rotation difference between camera's look direction and client forward.
-            const forward = new THREE.Vector3(0, 0, -1);
-            const rotationOffset = new THREE.Quaternion();
-            rotationOffset.setFromUnitVectors(lookDirection, forward);
-
-            // Get the direction we want the camera to look, and shift it by the camera's rotational offset.
-            const targetDirection = worldLookDirection.clone();
-            targetDirection.applyQuaternion(rotationOffset);
-            
-            this.#rotateClientSpaceToFace(targetDirection);      
-        }   
-
-        // Get the position of the camera within client space, snapped down to floor level.
-        const cameraOffset = this.vrCamera.position.clone();
-        cameraOffset.y = 0;
-
-        // Transform this position offset into world space.
-        cameraOffset.applyQuaternion(this.clientSpace.quaternion);
-
-        // Subtract this offset from our target floor position,
-        // to get the position where the client space needs to be for the camera to be above the target.
-        cameraOffset.multiplyScalar(-1);
-        cameraOffset.add(floorPositionUnderCamera);
-
-        // Apply the teleported position to the client space.
-        this.clientSpace.position.copy(cameraOffset);        
-        this.clientSpace.updateMatrixWorld();
-        this.vrCamera.updateMatrixWorld();
-
-        // Reposition the mosue camera in the same relative position.
-        // TODO: also adjust its rotation?
-        this.clientSpace.localToWorld(mouseCameraOffset);
-        this.mouseCamera.position.copy(mouseCameraOffset);
-    }
-
-    /**
-     * Rotates client space around the camera position as its pivot.
-     * @param {number} radianDelta Angle in radians to rotate counter-clockwise about the vertical axis.
-     */
-    rotateClientSpace (radianDelta) {
-        const cameraPosition = this.getFootPosition();
-
-        // Rotate client space on the y only.
-        this.clientSpace.rotation.y += radianDelta;
-        this.clientSpace.updateMatrixWorld();
-
-        // Teleport so our camera is back where it was originally.
-        this.teleportClientSpace(cameraPosition);
-    }
-
-    /**
-     * Call this function when leaving VR to reset the clientSpace orientation
-     * for mouse & keyboard control. Puts the camera back at a standard height above
-     * the origin of client space, with no roll rotation, while preserving the viewpoint.
-     */
-    handleExitVR() {
-        const footPosition = this.getFootPosition();        
-
-        const lookDirection = new THREE.Vector3();
-        cameraPosition.getWorldDirection(lookDirection);        
-
-        this.clientSpace.position.set(footPosition);
-        this.#rotateClientSpaceToFace(lookDirection);
-
-        this.vrCamera.position.set(0, this.playerHeight, 0);
-        this.vrCamera.rotation.z = 0;
-    }
-
-    #updateTeleportTargetFromRaycast() {
-        //print(`ray origin: ${vectorToString(this.raycaster.ray.origin)}`);
-        //print(`ray direction: ${vectorToString(this.raycaster.ray.direction)}`);
-
-        this.raycaster.firstHitOnly = true;
-        const hit = this.raycaster.intersectObjects(this.walkable)[0];
-        if (hit) {
-            //print(`hit: ${vectorToString(hit.point)}`);
-            this.teleportTarget.position.copy(hit.point);
-            this.teleportTarget.visible = true;
-            return hit.position;
-        }
-        // print(`no hit`);
-
-        this.teleportTarget.visible = false;
-        return null;
-    }
-
-    updateTeleportTargetFromMouse(mouse) {
-        this.raycaster.setFromCamera(mouse, this.mouseCamera);
-        return this.#updateTeleportTargetFromRaycast();
-    }
-
-    updateTeleportTargetFromRay(origin, direction) {        
-        this.raycaster.set(origin, direction);
-        return this.#updateTeleportTargetFromRaycast();
-    }
-
-    tryTeleportToTarget() {
-        if (this.teleportTarget.visible == false)
-            return false;
-        
-        this.teleportClientSpace(this.teleportTarget.position);
-        this.cancelTeleport();
-        return true;        
-    }
-
-    cancelTeleport() {
-        this.teleportTarget.visible = false;
-    }
 }
 
-// Export our world class to be used elsewhere.
-export { World };
+// get (or create) a room:
+function getRoom(name="default") {
+	if (!rooms[name]) {
+		rooms[name] = {
+			name: name,
+			clients: {},
+		}
+	}
+	return rooms[name]
+}
+
+function notifyRoom(roomname, msg) {
+	let room = rooms[roomname]
+	if (!room) return;
+	let mates = Object.values(room.clients)
+	for (let mate of mates) {
+		mate.socket.send(msg)
+	}
+}
+
+// generate a unique id if needed
+// verify id is unused (or generate a new one instead)
+// returns 128-bit UUID as a string:
+function newID(id="") {
+	while (!id || clients[id]) id = uuidv4()
+	return id
+}
+
+const PORT = process.env.PORT || 3000;
+const app = express();
+// allow cross-domain access:
+app.use(function(req, res, next) {
+	res.header('Access-Control-Allow-Origin', '*');
+	res.header('Access-Control-Allow-Methods', 'GET, OPTIONS');
+	res.header('Access-Control-Allow-Headers', 'Content-Type');
+	return next();
+});
+app.use(express.static(path.join(__dirname, 'public')));
+const server = http.createServer(app)
+const wss = new ws.Server({ server: server });
+
+
+wss.on('connection', (socket, req) => {
+	let room = url.parse(req.url).pathname.replace(/\/*$/, "").replace(/^\/*/, "").replace(/\/+/, "/")
+	let id = newID()
+	let client = {
+		socket: socket,
+		room: room,
+		shared: {
+			id: id,
+			pos: [0, 0, 0],
+			quat: [0, 0, 0, 1],
+			user: {}
+		}
+	}
+	clients[id] = client
+
+	console.log(`client ${client.shared.id} connecting to room ${client.room}`);
+
+	// enter this room
+	getRoom(client.room).clients[id] = client
+
+	socket.on('message', (msg) => {
+		//console.log(msg)
+		const s = msg.indexOf(" ")
+		if (s > 0) {
+			const cmd = msg.substr(0, s), rest = msg.substr(s+1)
+			switch(cmd) {
+				case "pose": 
+					let vals = rest.split(" ").map(Number)
+					client.shared.pos = vals.slice(0,3)
+					client.shared.quat = vals.slice(3, 7)
+					break;
+				case "user": 
+					client.shared.user = JSON.parse(rest)
+					break;
+			}
+		}
+	});
+
+	socket.on('error', (err) => {
+		console.log(err)
+		// should we exit?
+	});
+
+	socket.on('close', () => {
+		console.log("close", id)
+		console.log(Object.keys(clients))
+		delete clients[id]
+
+		// remove from room
+		if (client.room) delete rooms[client.room].clients[id]
+
+		console.log(`client ${id} left`)
+	});
+
+	socket.send("handshake " + id)
+});
+
+setInterval(function() {
+	for (let roomid of Object.keys(rooms)) {
+		const room = rooms[roomid]
+		let clientlist = Object.values(room.clients)
+		let shared = "mates " + JSON.stringify(clientlist.map(o=>o.shared));
+		clientlist.forEach(c => c.socket.send(shared))
+	}
+}, 1000/30);
+
+server.listen(PORT, () => console.log(`Server listening on port: ${PORT}`));
