@@ -10,6 +10,7 @@ import {print, vectorToString} from './utility.mjs';
  * Also responsible for maintaining the user's "client space" zone within the world,
  * tracking how the space of their sensor range in their physical room
  * maps into the virtual scene.
+ * 
  */ 
 class World {
     /** @type {THREE.Clock} */
@@ -96,6 +97,36 @@ class World {
         const material = new THREE.MeshLambertMaterial();
         this.defaultMaterial = material;
 
+        // ! radial gradient material
+
+        let floorMat = new THREE.ShaderMaterial({
+        //let floorMat = new THREE.MeshLambertMaterial({
+            uniforms: {
+              color1: { value: new THREE.Color(0xffffff)},
+              color2: { value: new THREE.Color(0x104A80)},
+              ratio: {value: innerWidth / innerHeight}
+            },
+            vertexShader: `
+                varying vec2 vUv;
+
+                void main() {
+                vUv = uv;
+                gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0);
+                }
+            `,
+            fragmentShader: `
+                uniform vec3 color1;
+                uniform vec3 color2;
+            
+                varying vec2 vUv;
+                
+                void main() {
+                
+                gl_FragColor = vec4(mix(color1, color2, vUv.y), 1.0);
+                }
+            `
+            });
+
         // Set up an attractive fog in the distance, to obscure harsh cutoff where the geometry ends,
         // and to give some atmospheric perspective, to help with depth perception (esp. in non-VR view).
         const fadeColor = 0x5099c5;
@@ -103,14 +134,14 @@ class World {
         scene.fog = new THREE.FogExp2(fadeColor, 0.05);
 
         // Create a floor plane marked with a grid to give local landmarks, so you can tell when you move.
-        const floor = new THREE.Mesh(new THREE.PlaneGeometry(800, 800), material);
+        const floor = new THREE.Mesh(new THREE.PlaneGeometry(200,200), floorMat);
         floor.receiveShadow = true;
         floor.rotation.x = -Math.PI / 2;
         scene.add(floor);
         this.walkable = [floor];
 
-        //const grid = new THREE.GridHelper(35, 35, 0x333366, 0x666666);
-        //scene.add(grid);
+        const grid = new THREE.GridHelper(200,200, 0x333366, 0x666666);
+        scene.add(grid);
         
         if (makeLights){
 
