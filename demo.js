@@ -1,7 +1,5 @@
 /*
-
 A simple server to manage user connections within different "rooms"
-
 Server: I open a websocket server
 Client: I connect to your websocket
 Server: wss.on('connection') -- I create a UUID and client struct for you, set up my handlers, and tell you "handshake <id>"
@@ -9,9 +7,6 @@ Client: I receive your "handshake", and copy that to my local session ID
 I reply with "handshake <id>" to confirm
 I will now start listening for other messages
 Server: I receive your "handshake" and I will now start listening for other messages
-
-
-
 Should:
 - ensure clients all have unique IDs (UUID)
 	- new client connection generates new UUID on server & server informs client
@@ -26,7 +21,6 @@ Should:
 - when a client enters or exits a room, update other clients in the same room
 - when a client changes some self-state (e.g. colour), update other clients in the same room
 - basically, forward all client changes to other clients in the same room
-
 A relatively lazy way to do this would be to simply send a list of client states to all members of a room, but that would be wasteful of bandwidth when client states get more complex. 
 Next laziest is to simply forward all client changes to other clients in the same room, adding the corresponding UUID. Change could be represented as a jsonpatch, but that would be wasteful for poses. Probably better to have a few commands.
 To server:
@@ -38,8 +32,6 @@ To clients:
 - "exit <uuid>"
 - "pose <uuid> <headpos array> <quat array>"
 - "patch <uuid> <jsonpatch>"
-
-
 JSONPATCH:
 - http://jsonpatchjs.com/ node and browser, does not mutate, 
 - https://github.com/Starcounter-Jack/JSON-Patch can mutate or not, observers, diffs. ACTIVE. benchmarks show this to be fastest
@@ -63,7 +55,7 @@ const clients = {}
 // each room would have a list of its occupants
 // a client can only be in one room at a time
 const rooms = {
-	
+
 }
 
 // get (or create) a room:
